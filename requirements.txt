@@ -1,0 +1,6 @@
+apache-airflow==2.5.0  # ou a versão desejada do Airflow
+confluent-kafka==2.8.0  # Para interagir com o Kafka
+minio==7.1.1  # Para interagir com o MinIO
+requests==2.28.2  # Para fazer requisições HTTP
+psycopg2==2.9.5  # Para interação com o PostgreSQL
+python-dotenv==0.21.0  # Caso esteja usando variáveis de ambiente de arquivos .env

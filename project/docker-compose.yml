@@ -1,0 +1,311 @@
+version: '3.8'
+
+services:
+  # Serviço do Spark Master
+  spark-master:
+    image: fjardim/mds-spark
+    platform: linux/amd64
+    hostname: spark-master
+    container_name: spark-master
+    command: 
+      - /bin/sh
+      - -c
+      - |
+        /usr/local/spark/sbin/start-master.sh
+        start-notebook.sh --NotebookApp.token=''
+    ports:
+      - 8889:8888
+      - 4040:4040
+      - 38080:8080
+      - 7077:7077
+    volumes:
+      - ./spark/work:/home/user 
+      - ./spark/env:/env 
+      - ./util:/util
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  # Serviço do Spark Worker
+  spark-worker:
+    image: fjardim/mds-spark
+    platform: linux/amd64
+    hostname: spark-worker
+    container_name: spark-worker
+    command: 
+      - /bin/sh
+      - -c
+      - |
+        /usr/local/spark/sbin/start-worker.sh spark-master:7077
+        start-notebook.sh --NotebookApp.token='' 
+    env_file:
+      - ./spark/env/jupyter.env
+    ports:
+      - 5040:4040
+      - 38081:8081
+    volumes:
+      - ./util:/util
+      - ./spark/work:/home/user 
+    environment:
+      SPARK_MASTER: spark-master
+    depends_on:
+      - spark-master
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  # Serviço do MinIO
+  minio:
+    image: minio/minio:latest
+    platform: linux/amd64
+    container_name: minio
+    entrypoint: sh
+    command: '-c "mkdir -p /minio_data/raw && mkdir -p /minio_data/trusted && minio server /minio_data --console-address \":9001\""'
+    ports:
+      - "9050:9000"
+      - "9051:9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ACCESS_KEY: datalake
+      MINIO_SECRET_KEY: datalake
+    volumes:
+      - ./minio/data1:/data
+    networks:
+      - airflow_network
+
+  # Serviço do PostgreSQL
+  postgres:
+    image: postgres:13
+    container_name: postgres
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin123
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - airflow_network
+
+  # Serviço do Kafkaservices:
+  zookeeper:
+    image: fjardim/mds-kafka-zookeeper
+    platform: linux/amd64
+    hostname: zookeeper
+    container_name: zookeeper
+    ports:
+       - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - airflow_network
+
+  kafka-broker:
+    image: fjardim/mds-kafka-broker
+    platform: linux/amd64
+    container_name: kafka-broker
+    hostname: kafka-broker
+    ports:
+      - "9092:9092"
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-broker:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      CONFLUENT_METRICS_REPORTER_BOOTSTRAP_SERVERS: kafka-broker:9092
+      CONFLUENT_METRICS_REPORTER_TOPIC_REPLICAS: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: kafka-broker
+      CONFLUENT_METRICS_ENABLE: 'true'
+      CONFLUENT_SUPPORT_CUSTOMER_ID: 'anonymous'
+    networks:
+      - airflow_network
+
+  kafka-schema-registry:
+    image: fjardim/mds-kafka-schema-registry
+    platform: linux/amd64
+    hostname: kafka-schema-registry
+    container_name: kafka-schema-registry
+    depends_on:
+      - kafka-broker
+    ports:
+      - "8071:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'kafka-broker:9092'
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    networks:
+      - airflow_network
+
+  kafka-connect:
+    image: fjardim/mds-kafka-connect
+    platform: linux/amd64
+    hostname: kafka-connect
+    container_name: kafka-connect
+    depends_on:
+      - kafka-broker
+      - kafka-schema-registry
+    ports:
+      - "8083:8083"
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: 'kafka-broker:9092'
+      CONNECT_REST_ADVERTISED_HOST_NAME: connect
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: connect-group
+      CONNECT_CONFIG_STORAGE_TOPIC: connect-configs
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_FLUSH_INTERVAL_MS: 10000
+      CONNECT_OFFSET_STORAGE_TOPIC: connect-offsets
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_TOPIC: connect-status
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_INTERNAL_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_INTERNAL_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://kafka-schema-registry:8081
+      CLASSPATH: /usr/share/java/monitoring-interceptors/monitoring-interceptors-6.1.0.jar
+      CONNECT_PRODUCER_INTERCEPTOR_CLASSES: "io.confluent.monitoring.clients.interceptor.MonitoringProducerInterceptor"
+      CONNECT_CONSUMER_INTERCEPTOR_CLASSES: "io.confluent.monitoring.clients.interceptor.MonitoringConsumerInterceptor"
+      CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components"
+      CONNECT_LOG4J_LOGGERS: org.apache.zookeeper=ERROR,org.I0Itec.zkclient=ERROR,org.reflections=ERROR
+    networks:
+      - airflow_network
+
+  kafka-control-center:
+    image: fjardim/mds-kafka-control-center
+    platform: linux/amd64
+    hostname: kafka-control-center
+    container_name: kafka-control-center
+    depends_on:
+      - kafka-broker
+      - kafka-schema-registry
+      - kafka-connect
+      - kafka-ksqldb-server
+      - kafka-ksqldb-cli
+    ports:
+      - "9021:9021"
+    environment:
+      CONTROL_CENTER_BOOTSTRAP_SERVERS: 'kafka-broker:9092'
+      CONTROL_CENTER_CONNECT_CLUSTER: 'kafka-connect:8083'
+      CONTROL_CENTER_CONNECT_CONNECT-DEFAULT_CLUSTER: 'kafka-connect:8083'
+      CONTROL_CENTER_KSQL_KSQLDB1_URL: "http://kafka-ksqldb-server:8088"
+      CONTROL_CENTER_KSQL_KSQLDB1_ADVERTISED_URL: "http://kafka-ksqldb-server:8088"
+      CONTROL_CENTER_SCHEMA_REGISTRY_URL: "http://kafka-schema-registry:8081"
+      CONTROL_CENTER_REPLICATION_FACTOR: 1
+      CONTROL_CENTER_INTERNAL_TOPICS_PARTITIONS: 1
+      CONTROL_CENTER_MONITORING_INTERCEPTOR_TOPIC_PARTITIONS: 1
+      CONFLUENT_METRICS_TOPIC_REPLICATION: 1
+      CONTROL_CENTER_CONNECT_HEALTHCHECK_ENDPOINT: '/connectors'
+    networks:
+      - airflow_network
+
+  kafka-ksqldb-server:
+    image: fjardim/mds-kafka-ksqldb-server
+    platform: linux/amd64
+    hostname: kafka-ksqldb-server
+    container_name: kafka-ksqldb-server
+    depends_on:
+      - kafka-broker
+      - kafka-connect
+    ports:
+      - "8068:8088"
+    environment:
+      KSQL_CONFIG_DIR: "/etc/ksql"
+      KSQL_BOOTSTRAP_SERVERS: "kafka-broker:9092"
+      KSQL_HOST_NAME: ksqldb-server
+      KSQL_LISTENERS: "http://0.0.0.0:8088"
+      KSQL_CACHE_MAX_BYTES_BUFFERING: 0
+      KSQL_KSQL_SCHEMA_REGISTRY_URL: "http://kafka-schema-registry:8081"
+      KSQL_PRODUCER_INTERCEPTOR_CLASSES: "io.confluent.monitoring.clients.interceptor.MonitoringProducerInterceptor"
+      KSQL_CONSUMER_INTERCEPTOR_CLASSES: "io.confluent.monitoring.clients.interceptor.MonitoringConsumerInterceptor"
+      KSQL_KSQL_CONNECT_URL: "http://kafka-connect:8083"
+      KSQL_KSQL_LOGGING_PROCESSING_TOPIC_REPLICATION_FACTOR: 1
+      KSQL_KSQL_LOGGING_PROCESSING_TOPIC_AUTO_CREATE: 'true'
+      KSQL_KSQL_LOGGING_PROCESSING_STREAM_AUTO_CREATE: 'true'
+    networks:
+      - airflow_network
+
+  kafka-ksqldb-cli:
+    image: fjardim/mds-kafka-sqldb-cli
+    platform: linux/amd64
+    container_name: kafka-ksqldb-cli
+    hostname: kafka-ksqldb-cli
+    depends_on:
+      - kafka-broker
+      - kafka-connect
+      - kafka-ksqldb-server
+    entrypoint: /bin/sh
+    tty: true
+    networks:
+      - airflow_network
+
+  kafka-rest-proxy:
+    image: fjardim/mds-kafka-rest
+    platform: linux/amd64
+    hostname: kafka-rest-proxy
+    depends_on:
+      - kafka-broker
+      - kafka-schema-registry
+    ports:
+      - "8082:8082"
+    container_name: kafka-rest-proxy
+    environment:
+      KAFKA_REST_HOST_NAME: rest-proxy
+      KAFKA_REST_BOOTSTRAP_SERVERS: 'kafka-broker:9092'
+      KAFKA_REST_LISTENERS: "http://0.0.0.0:8082"
+      KAFKA_REST_SCHEMA_REGISTRY_URL: 'http://schema-registry:8081'
+    networks:
+      - airflow_network
+
+  # Serviço do Airflow
+  airflow:
+    image: apache/airflow:2.5.0
+    container_name: airflow
+    environment:
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://admin:admin123@postgres:5432/airflow
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__FERNET_KEY=G6bXfyzd4k8H02HvxqvQQcEgQ50XGy1Rtdg9vlMJ42Q=
+      - AIRFLOW__WEBSERVER__USERNAME=admin
+      - AIRFLOW__WEBSERVER__PASSWORD=admin123
+    ports:
+      - "8080:8080"
+    volumes:
+      - "./airflow/dags:/opt/airflow/dags"
+      - "./airflow/logs:/opt/airflow/logs"
+      - "C:/labdata/projeto_labdata/requirements.txt:/requirements.txt"
+    entrypoint: >
+      /bin/bash -c "
+      pip install -r /requirements.txt &&
+      airflow db upgrade &&
+      airflow users create --username admin --firstname Admin --lastname User --email admin@example.com --role Admin --password admin123 &&
+      airflow standalone"
+    depends_on:
+      - postgres
+      - kafka-broker
+    networks:
+      - airflow_network
+    command: "airflow standalone"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  airflow_dags:
+  airflow_logs:
+  minio_data:  # 🔥 Volume corrigido
+
+networks:
+  airflow_network:
+    driver: bridge

@@ -1,0 +1,24 @@
+venv/
+__pycache__/
+*.pyc
+
+# Arquivos de configuração de IDEs
+.vscode/
+.idea/
+
+# Arquivos de configuração do Docker
+*.log
+*.pid
+*.sock
+
+# Arquivos de banco de dados e cache do PostgreSQL
+*.db
+*.sqlite
+*.sqlite3
+
+docker-compose.override.yml
+postgres_data/
+
+Thumbs.db    # Windows
+
+project/airflow/logs/
